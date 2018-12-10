@@ -1,41 +1,51 @@
 from mpi4py import MPI
 import numpy as np
 import imageio
-
+import time
 
 class Sobel:
-    def __init__(self):
+    def __init__(self,path):
         self.comm = MPI.COMM_WORLD
         self.size = self.comm.Get_size()
         self.rank = self.comm.Get_rank()
 
         itemsize = MPI.DOUBLE.Get_size()
         imshape = None
+        gray_scaled_flag = False
         if self.rank == 0:
-            path = ''
-            path = input('enter image\'s path : ')
+            self.time = time.process_time()
             im = imageio.imread(path).astype(dtype='d')
-            im = np.pad(im, pad_width=((1, 1), (1, 1), (0, 0)),
+            pad = None
+            if len(im.shape) ==2:
+                pad=((1,1),(1,1))
+                gray_scaled_flag =True
+            else:
+                pad=((1, 1), (1, 1), (0, 0))
+            im = np.pad(im, pad_width=pad,
                         mode='constant', constant_values=0)
-            imsize = im.size
+            imsize = im.shape[0]*im.shape[1]
             imshape = im.shape
             nbyte = imsize * itemsize
 
         else:
             nbyte = 0
+            im=None
         imshape = self.comm.bcast(imshape, root=0)
-
+        gray_scaled_flag= self.comm.bcast(gray_scaled_flag,root=0)
         win = MPI.Win.Allocate_shared(nbyte, itemsize, comm=self.comm)
 
         buf, itemsize = win.Shared_query(0)
         assert itemsize == MPI.DOUBLE.Get_size()
-        imshape[0]
-        self.arr = np.ndarray(buffer=buf, dtype='d', shape=imshape)
-
-        if self.rank == 0:
-            np.copyto(dst=self.arr, src=im)
+        
+        self.arr = np.ndarray(buffer=buf, dtype='d', shape=imshape[0:2])
+        if gray_scaled_flag ==False:
+            self.__gray_scale(im)
+        else:
+            if self.rank == 0:
+                np.copyto(dst=self.arr, src=im)
 
         self.comm.Barrier()
+        
         self.filter_v = np.array([
             [-1, 0, 1],
             [-2, 0, 2],
@@ -46,21 +56,46 @@ class Sobel:
             [0, 0, 0],
             [1, 2, 1]
         ])
-        print('init done p#',self.rank)
+        if self.rank == 0:
+            imageio.imsave('gray_scaled.jpg',self.arr.astype(dtype=np.uint8))
+        #print('init done p#',self.rank)
+
+    def __gray_scale(self,im):
+        if self.rank ==0:
+            di=im.shape
+            start=0
+            end=0
+            #print('full : ',di)
+            for i in range(1,self.size-1):
+                start=(i-1)*(di[0]/(self.size-1))
+                end=(i)*(di[0]/(self.size-1))
+                #print('i = ',i,' start = ',start,' end = ',end)
+                self.comm.send(obj=im[int(start):int(end),:,:],dest=i)
+            self.comm.send(obj=im[int(end):int(di[0]),:,:],dest=self.size-1)
+        else:
+
+            arr=self.comm.recv(source=0)
+            arrdi=arr.shape
+            start=int((self.rank-1)*(self.arr.shape[0]/(self.size-1)))
+            #print('from self.rank ',self.rank,' di = ',arrdi)
+            for i in range(arrdi[0]):
+                for j in range(arrdi[1]):
+                    self.arr[start+i,j]=(arr[i,j,0]/3+arr[i,j,1]/3+arr[i,j,2]/3)
+                    
+
 
     def Sobel_v(self, start, end):
         '''
         start = start of the image  should be 1 for first index
         end = end of the image  should be image height -1 for last index
         '''
-        print('Sobel V from P#',self.rank,' start : ',start,' end : ',end)
-        res = np.empty(shape=(end-start, self.arr.shape[1]-2, self.arr.shape[2]), dtype='d')
+        #print('Sobel V from P#',self.rank,' start : ',start,' end : ',end)
+        res = np.empty(shape=(end-start, self.arr.shape[1]-2), dtype='d')
         for i in range(start, end):
             for j in range(1, self.arr.shape[1]-1):
-                for z in range(self.arr.shape[2]):
-                    res[i-start, j-1, z] = np.sum(np.multiply(
-                        self.arr[i-1:i+2, j-1:j+2, z], self.filter_v))
-        print('sobel V end P#',self.rank)
+                res[i-start, j-1] = np.sum(np.multiply(
+                    self.arr[i-1:i+2, j-1:j+2], self.filter_v))
+        #print('sobel V end P#',self.rank)
         self.comm.send(res, dest=0, tag=1)
 
     def Sobel_h(self, start, end):
@@ -68,13 +103,12 @@ class Sobel:
         start = start of the image  should be 1 for first index
         end = end of the image  should be image height -1 for last index
         '''
-        print('Sobel H from P#',self.rank,' start : ',start,' end : ',end)
-        res = np.empty(shape=(end-start, self.arr.shape[1]-2,self.arr.shape[2]),dtype='d')
+        #print('Sobel H from P#',self.rank,' start : ',start,' end : ',end)
+        res = np.empty(shape=(end-start, self.arr.shape[1]-2),dtype='d')
         for i in range(start, end):
             for j in range(1, self.arr.shape[1]-1):
-                for z in range(self.arr.shape[2]):
-                    res[i-start, j-1, z] = np.sum(np.multiply(self.arr[i-1:i+2, j-1:j+2, z],self.filter_h))
-        print('sobel H end P#',self.rank)
+                res[i-start, j-1] = np.sum(np.multiply(self.arr[i-1:i+2, j-1:j+2],self.filter_h))
+        #print('sobel H end P#',self.rank)
         self.comm.send(res,dest=0,tag=2)
 
     def __get_start_end_padded(self,rank):
@@ -90,19 +124,20 @@ class Sobel:
 
     def Compute(self):
         if self.rank == 0:
-            res_v=np.empty(shape=(self.arr.shape[0]-2,self.arr.shape[1]-2,self.arr.shape[2]),dtype='d')
-            res_h=np.empty(shape=(self.arr.shape[0]-2,self.arr.shape[1]-2,self.arr.shape[2]),dtype='d')
-            print('res_v.shape = ',res_v.shape)
+            res_v=np.empty(shape=(self.arr.shape[0]-2,self.arr.shape[1]-2),dtype='d')
+            res_h=np.empty(shape=(self.arr.shape[0]-2,self.arr.shape[1]-2),dtype='d')
+            #print('res_v.shape = ',res_v.shape)
             for i in range(1,self.size):
                 start ,end = self.__get_start_end_padded(i)
-                res_v[start:end,:,:]=self.comm.recv(source=i,tag=1)
-                res_h[start:end,:,:]=self.comm.recv(source=i,tag=2)
-                print(i,' heeeh')
+                res_v[start:end,:]=self.comm.recv(source=i,tag=1)
+                res_h[start:end,:]=self.comm.recv(source=i,tag=2)
+                #print(i,' heeeh')
             final_image = np.absolute(np.add(res_h,res_v))
+            print('Sobel excution time : ',time.process_time()-self.time)
             imageio.imsave('result.jpg',final_image.astype(dtype=np.uint8))
         else:
             start,end = self.__get_start_end_padded(self.rank)
-            print('rank ',self.rank,)
+            #print('rank ',self.rank,)
             self.Sobel_v(start,end)
             self.Sobel_h(start,end)
         

@@ -8,7 +8,9 @@ comm = MPI.COMM_WORLD
 
 size = comm.Get_size()
 rank = comm.Get_rank()
+path = ''
+if rank == 0:
+    path = input('enter image\'s path : ')
 
-
-s = Sobel()
+s = Sobel(path)
 s.Compute()
