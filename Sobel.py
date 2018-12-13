@@ -39,13 +39,19 @@ class Sobel:
         
         self.arr = np.ndarray(buffer=buf, dtype='d', shape=imshape[0:2])
         if gray_scaled_flag ==False:
-            self.__gray_scale(im)
+            self.gray_scale(im)
         else:
             if self.rank == 0:
                 np.copyto(dst=self.arr, src=im)
 
         self.comm.Barrier()
-        
+        # if self.rank>0:
+        #     self.noise_remove()
+        # else:
+        #     for i in range(1,self.size-1):
+        #         start ,end = self.get_start_end_padded(i)
+        #         self.arr[start+2:end+2,:]=self.comm.recv(source=i,tag=0)
+        #     self.arr[end+2:,:]=self.comm.recv(source=self.size-1,tag=0)
         self.filter_v = np.array([
             [-1, 0, 1],
             [-2, 0, 2],
@@ -56,11 +62,11 @@ class Sobel:
             [0, 0, 0],
             [1, 2, 1]
         ])
-        if self.rank == 0:
-            imageio.imsave('gray_scaled.jpg',self.arr.astype(dtype=np.uint8))
+        # if self.rank == 0:
+        #     imageio.imsave('gray_scaled.jpg',self.arr.astype(dtype=np.uint8))
         #print('init done p#',self.rank)
 
-    def __gray_scale(self,im):
+    def gray_scale(self,im):
         if self.rank ==0:
             di=im.shape
             start=0
@@ -82,7 +88,19 @@ class Sobel:
                 for j in range(arrdi[1]):
                     self.arr[start+i,j]=(arr[i,j,0]/3+arr[i,j,1]/3+arr[i,j,2]/3)
                     
-
+    def noise_remove(self):
+        start,end= self.get_start_end_padded(self.rank)
+        mean_filter = np.array([
+            [1/9,1/9,1/9],
+            [1/9,1/9,1/9],
+            [1/9,1/9,1/9]
+        ])
+        res = np.zeros(shape=(end-start, self.arr.shape[1]), dtype='d')
+        for i in range(start, end):
+            for j in range(1, self.arr.shape[1]-1):
+                res[i-start, j-1] = np.sum(np.multiply(
+                    self.arr[i-1:i+2, j-1:j+2], mean_filter))
+        self.comm.send(res, dest=0, tag=0)
 
     def Sobel_v(self, start, end):
         '''
@@ -93,8 +111,8 @@ class Sobel:
         res = np.empty(shape=(end-start, self.arr.shape[1]-2), dtype='d')
         for i in range(start, end):
             for j in range(1, self.arr.shape[1]-1):
-                res[i-start, j-1] = np.sum(np.multiply(
-                    self.arr[i-1:i+2, j-1:j+2], self.filter_v))
+                res[i-start, j-1] = self.threshhold(np.sum(np.multiply(
+                    self.arr[i-1:i+2, j-1:j+2], self.filter_v)),20)
         #print('sobel V end P#',self.rank)
         self.comm.send(res, dest=0, tag=1)
 
@@ -107,11 +125,11 @@ class Sobel:
         res = np.empty(shape=(end-start, self.arr.shape[1]-2),dtype='d')
         for i in range(start, end):
             for j in range(1, self.arr.shape[1]-1):
-                res[i-start, j-1] = np.sum(np.multiply(self.arr[i-1:i+2, j-1:j+2],self.filter_h))
+                res[i-start, j-1] = self.threshhold(np.sum(np.multiply(self.arr[i-1:i+2, j-1:j+2],self.filter_h)),20)
         #print('sobel H end P#',self.rank)
         self.comm.send(res,dest=0,tag=2)
 
-    def __get_start_end_padded(self,rank):
+    def get_start_end_padded(self,rank):
         start = (rank-1) * int(self.arr.shape[0]/(self.size-1))
         if rank == 1 :
             start+=1
@@ -120,7 +138,11 @@ class Sobel:
         else:
             end =int( self.arr.shape[0]-2)
         return (start,end)
-
+    def threshhold(self,pix_val,thresh_val):
+        if pix_val<thresh_val:
+            return 0
+        else:
+            return 255
 
     def Compute(self):
         if self.rank == 0:
@@ -128,7 +150,7 @@ class Sobel:
             res_h=np.empty(shape=(self.arr.shape[0]-2,self.arr.shape[1]-2),dtype='d')
             #print('res_v.shape = ',res_v.shape)
             for i in range(1,self.size):
-                start ,end = self.__get_start_end_padded(i)
+                start ,end = self.get_start_end_padded(i)
                 res_v[start:end,:]=self.comm.recv(source=i,tag=1)
                 res_h[start:end,:]=self.comm.recv(source=i,tag=2)
                 #print(i,' heeeh')
@@ -136,7 +158,7 @@ class Sobel:
             print('Sobel excution time : ',time.process_time()-self.time)
             imageio.imsave('result.jpg',final_image.astype(dtype=np.uint8))
         else:
-            start,end = self.__get_start_end_padded(self.rank)
+            start,end = self.get_start_end_padded(self.rank)
             #print('rank ',self.rank,)
             self.Sobel_v(start,end)
             self.Sobel_h(start,end)
